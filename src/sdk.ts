@@ -1377,6 +1377,23 @@ export async function createArmadaSdk(config: ArmadaSdkConfig): Promise<ArmadaSd
       };
       return loaded(new ArmadaWallet(keyset, opts.creationBlock, undefined, ctx));
     },
+    async fromViewingKeyWithSigner(shareableViewingKey, opts) {
+      const { viewingPrivateKey, spendingPublicKey } = decodeShareableViewingKey(shareableViewingKey);
+      const identity = await deriveViewOnlyIdentity(viewingPrivateKey, spendingPublicKey);
+      // Same view-only keyset as viewOnlyFromViewingKey — no spending PRIVATE key, so the key never
+      // enters this process — but with the supplied SpendSigner attached, so spend-path calls route
+      // through it (proving stays public-key-only; signing stays private-key-only in the signer).
+      const keyset: Keyset = {
+        spendingPublicKey,
+        spendingPrivateKey: new Uint8Array(0),
+        viewingPublicKey: identity.viewingPublicKey,
+        viewingPrivateKey,
+        nullifyingKey: identity.nullifyingKey,
+        masterPublicKey: identity.masterPublicKey,
+        shieldedAddress: identity.shieldedAddress,
+      };
+      return loaded(new ArmadaWallet(keyset, opts.creationBlock, opts.signer, ctx));
+    },
   };
 
   return {

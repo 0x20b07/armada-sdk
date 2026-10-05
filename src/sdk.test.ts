@@ -16,7 +16,7 @@ import {
   buildReceivedNote,
 } from './sdk';
 import { RootMismatchError, QuickSyncSchemaError, IndexerHttpError, PositionGapError } from './errors';
-import { deriveKeyset, LocalSigner } from './wallet/index';
+import { deriveKeyset, LocalSigner, ExternalSigner } from './wallet/index';
 import { saveScanState, WalletScanState } from './sync/index';
 import { MemoryStorageAdapter, walletRecordId } from './storage/index';
 import { NoSpendCapabilityError, InvalidKeyMaterialError, InvalidRequestError, UnsupportedCircuitShapeError } from './errors';
@@ -167,6 +167,106 @@ describe('createArmadaSdk (§4.1)', () => {
     // Spend-path calls on a view-only wallet throw NoSpendCapabilityError.
     await expect(viewOnly.planTransfer({ outputs: [{ to0zk: '0zk', amount: 1n }] })).rejects.toThrow(NoSpendCapabilityError);
     await expect(viewOnly.proveAll([])).rejects.toThrow(NoSpendCapabilityError);
+  });
+
+  it('fromViewingKeyWithSigner returns a spend-capable wallet with the same view-only identity, no private key', async () => {
+    const sdk = await createArmadaSdk(makeConfig());
+    const full = await sdk.wallet.fromRootSecret(seed(0x11), {
+      creationBlock: 1,
+      signer: await LocalSigner.fromRootSecret(seed(0x11)),
+    });
+    const key = full.shareViewingKey();
+
+    const viewOnly = await sdk.wallet.viewOnlyFromViewingKey(key, { creationBlock: 1 });
+    const withSigner = await sdk.wallet.fromViewingKeyWithSigner(key, {
+      creationBlock: 1,
+      signer: await LocalSigner.fromRootSecret(seed(0x11)),
+    });
+
+    // The attached signer grants spend capability — unlike plain viewOnlyFromViewingKey.
+    expect(withSigner.canSpend).toBe(true);
+    expect(viewOnly.canSpend).toBe(false);
+
+    // Same derived identity as view-only: attaching a signer changes nothing about the keyset.
+    expect(withSigner.shieldedAddress).toBe(viewOnly.shieldedAddress);
+    expect(withSigner.shieldedAddress).toBe(full.shieldedAddress);
+    // The shared viewing key carries only vpriv + spub — no spending private key was added, so
+    // re-encoding it yields exactly the key this wallet was built from.
+    expect(withSigner.shareViewingKey()).toBe(viewOnly.shareViewingKey());
+    expect(withSigner.shareViewingKey()).toBe(key);
+  });
+
+  it('fromViewingKeyWithSigner: spend path works through the signer (no NoSpendCapabilityError)', async () => {
+    const sdk = await createArmadaSdk(makeConfig());
+    const full = await sdk.wallet.fromRootSecret(seed(0x11), {
+      creationBlock: 1,
+      signer: await LocalSigner.fromRootSecret(seed(0x11)),
+    });
+    const viewOnly = await sdk.wallet.viewOnlyFromViewingKey(full.shareViewingKey(), { creationBlock: 1 });
+    const withSigner = await sdk.wallet.fromViewingKeyWithSigner(full.shareViewingKey(), {
+      creationBlock: 1,
+      signer: await LocalSigner.fromRootSecret(seed(0x11)),
+    });
+
+    // planTransfer passes the canSpend gate (it then fails on the empty balance, NOT the signer gate).
+    await expect(withSigner.planTransfer({ outputs: [{ to0zk: '0zk', amount: 1n }] })).rejects.not.toBeInstanceOf(NoSpendCapabilityError);
+    await expect(viewOnly.planTransfer({ outputs: [{ to0zk: '0zk', amount: 1n }] })).rejects.toThrow(NoSpendCapabilityError);
+    // proveAll([]) is a signer-gated no-op: fine with a signer, throws without one.
+    await expect(withSigner.proveAll([])).resolves.toEqual([]);
+    await expect(viewOnly.proveAll([])).rejects.toThrow(NoSpendCapabilityError);
+    // markSpendPending resolves with a signer attached; view-only still rejects (issue #55).
+    const plan = { selectedInputs: [{ tree: 0, position: 0 }] } as unknown as Plan;
+    await expect(withSigner.markSpendPending(plan, '0xabc')).resolves.toBeUndefined();
+    await expect(viewOnly.markSpendPending(plan, '0xabc')).rejects.toThrow(NoSpendCapabilityError);
+  });
+
+  it('fromViewingKeyWithSigner signs through the attached signer (assert signBatch was called)', async () => {
+    const sdk = await createArmadaSdk(makeConfig());
+    const full = await sdk.wallet.fromRootSecret(seed(0x11), {
+      creationBlock: 1,
+      signer: await LocalSigner.fromRootSecret(seed(0x11)),
+    });
+    const recipient = await sdk.wallet.fromRootSecret(seed(0x22), { creationBlock: 1 });
+
+    // An ExternalSigner backed by the same local key material — simulates the out-of-process signer
+    // the gateway delegates to; the wallet itself holds no spending private key.
+    const local = await LocalSigner.fromRootSecret(seed(0x11));
+    let signBatchCalls = 0;
+    const external = new ExternalSigner(
+      async (requests) => { signBatchCalls += 1; return local.signBatch(requests); },
+      () => local.getSpendingPublicKey(),
+    );
+    const wallet = await sdk.wallet.fromViewingKeyWithSigner(full.shareViewingKey(), {
+      creationBlock: 1,
+      signer: external,
+    });
+
+    // A minimal spendable plan (offline: the prover + artifacts in makeConfig() are stubs).
+    const plan: Plan = {
+      shape: { nullifiers: 1, commitments: 2 },
+      merkleRoot: 1n,
+      summary: {
+        tokenAddress: USDC,
+        inputTotal: 10n,
+        outputs: [{ toShieldedAddress: recipient.shieldedAddress, value: 6n, tokenAddress: USDC }],
+        changeValue: 4n,
+      },
+      boundParams: {
+        treeNumber: 0, minGasPrice: 0n, unshield: 0, chainID: 0n,
+        adaptContract: '0x0000000000000000000000000000000000000000',
+        adaptParams: `0x${'00'.repeat(32)}`,
+      },
+      selectedInputs: [{
+        tree: 0, position: 0, tokenHash: getTokenDataHash(getTokenDataERC20(USDC)), value: 10n,
+        blockNumber: 1, txid: '0x', origin: 'transact', random: '11'.repeat(16), notePublicKey: 1n,
+      }],
+      merkleProofs: [Array<bigint>(16).fill(0n)],
+    };
+
+    const handles = await wallet.proveAll([plan]);
+    expect(handles).toHaveLength(1);
+    // The signature came from the injected ExternalSigner's backend — not a local key in the wallet.
+    expect(signBatchCalls).toBe(1);
   });
 
   it('markSpendPending requires spend capability; clearSpendPending is always safe (issue #55)', async () => {

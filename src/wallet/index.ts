@@ -257,6 +257,17 @@ export interface WalletFactory {
   ): Promise<Wallet>;
   /** View-only: full scan/balance/disclosure, no spend (spend-path calls throw NoSpendCapabilityError). */
   viewOnlyFromViewingKey(shareableViewingKey: string, opts: { creationBlock: number }): Promise<Wallet>;
+  /**
+   * View-only keyset WITH an attached `SpendSigner` (SPEC §4.2.1): the gateway's spend-capable-but-
+   * hold-nothing wallet. Same identity derivation as `viewOnlyFromViewingKey` — no spending PRIVATE
+   * key ever enters this process (proving stays public-key-only) — but spend-path calls route
+   * through the supplied signer (e.g. the gateway's socket-delegating `ExternalSigner`), so
+   * `planTransfer`/`proveAll`/`markSpendPending` work instead of throwing `NoSpendCapabilityError`.
+   */
+  fromViewingKeyWithSigner(
+    shareableViewingKey: string,
+    opts: { creationBlock: number; signer: SpendSigner },
+  ): Promise<Wallet>;
 }
 
 // Implementations.
