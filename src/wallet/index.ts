@@ -277,6 +277,7 @@ export { LocalSigner } from './local-signer';
 
 export { ExternalSigner } from './external-signer';
 export type { SignBackend, PublicKeyBackend } from './external-signer';
+export { assertValidBabyJubjubPublicKey } from './keys-validate';
 export { deriveViewOnlyIdentity } from './view-only';
 export type { ViewOnlyIdentity } from './view-only';
 export { encodeShareableViewingKey, decodeShareableViewingKey } from './shareable-viewing-key';
